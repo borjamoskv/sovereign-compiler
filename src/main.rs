@@ -4,6 +4,8 @@ pub mod lexer;
 pub mod parser;
 pub mod ir;
 pub mod lowering;
+pub mod liveness;
+pub mod regalloc;
 pub mod backend;
 
 use logos::Logos;
@@ -11,18 +13,16 @@ use lexer::Token;
 use parser::Parser;
 use borrowck::{BorrowContext, check_statement};
 use lowering::IrLoweringVisitor;
-use backend::generate_x86_64_from_ir;
+use liveness::compute_live_intervals;
+use regalloc::LinearScanAllocator;
+use backend::generate_x86_64_optimized;
 
 fn main() {
     println!("=================================================================");
-    println!("   SOVEREIGN COMPILER v0.2.0 - C5-REAL ARCHITECTURE             ");
-    println!("   BIFURCACIÓN 2: DESCENSO AL SILICIO (SSA IR & CFG LOWERING)   ");
+    println!("   SOVEREIGN COMPILER v0.3.0 - C5-REAL ARCHITECTURE             ");
+    println!("   BIFURCACIÓN 3: LIVENESS ANALYSIS & LINEAR SCAN REGALLOC      ");
     println!("=================================================================\n");
 
-    // Código fuente demostrando los tres imperativos:
-    // 1. Owned buffer (1024 bytes) -> Materialización de SyntheticDrop
-    // 2. Escalar Copy (number: 42) -> Libre de destrucción
-    // 3. Puntero MMIO en Ring-0 (*mmio_port = number) -> VolatileStore inmutable
     let source_code = r#"
     {
         let buffer: owned u8 = 1024;
@@ -41,13 +41,13 @@ fn main() {
     // --- FASE 1: Lexer ---
     let lexer = Token::lexer(source_code);
     let tokens: Vec<Token> = lexer.filter_map(Result::ok).collect();
-    println!("[2] Lexer: Compresión a Tokens completada ({} tokens generados).", tokens.len());
+    println!("[2] Lexer: Compresión a Tokens completada ({} tokens).", tokens.len());
 
     // --- FASE 2: Parser ---
     let mut parser = Parser::new(tokens.into_iter());
     let ast = match parser.parse_block() {
         Ok(tree) => {
-            println!("[3] Parser: Árbol Sintáctico Abstracto (AST) proyectado con éxito.");
+            println!("[3] Parser: AST proyectado con éxito.");
             tree
         }
         Err(e) => {
@@ -79,11 +79,33 @@ fn main() {
     println!("{}", function_ir);
     println!("==============================================\n");
 
-    // --- FASE 5: Backend de Código Máquina ---
-    println!("[6] Backend: Emisión de Código Máquina (x86_64 Bare-Metal Ring-0)...");
-    let asm_output = generate_x86_64_from_ir(&function_ir);
+    // --- FASE 5: Liveness Analysis ---
+    println!("[6] Liveness Analysis: Computando Intervalos de Vida [start, end]...");
+    let live_intervals = compute_live_intervals(&function_ir);
+    println!("--------------------------------------------------");
+    for inv in &live_intervals {
+        println!("  Registro SSA {}: [{:>2}, {:>2}] (delta = {} ciclos virtuales)",
+            inv.reg, inv.start, inv.end, inv.end - inv.start);
+    }
+    println!("--------------------------------------------------\n");
 
-    println!("\n--- OUTPUT ENSAMBLADOR EMITIDO ---");
+    // --- FASE 6: Linear Scan Register Allocation ---
+    println!("[7] Linear Scan Allocator: Asignando Registros Físicos x86_64...");
+    let allocator = LinearScanAllocator::default_x86_64();
+    let assignment = allocator.allocate(live_intervals);
+
+    println!("--------------------------------------------------");
+    for (reg, loc) in &assignment.mapping {
+        println!("  Registro SSA {} -> {}", reg, loc);
+    }
+    println!("  Presión de Memoria: {} spills a stack", assignment.num_spills);
+    println!("--------------------------------------------------\n");
+
+    // --- FASE 7: Backend Optimizado ---
+    println!("[8] Backend: Emitiendo Ensamblador Optimizado (x86_64 Bare-Metal)...");
+    let asm_output = generate_x86_64_optimized(&function_ir, &assignment);
+
+    println!("\n--- OUTPUT ENSAMBLADOR EMITIDO (ALTA EXERGÍA) ---");
     println!("{}", asm_output);
-    println!("----------------------------------");
+    println!("-------------------------------------------------");
 }

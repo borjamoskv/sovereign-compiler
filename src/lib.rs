@@ -4,4 +4,6 @@ pub mod lexer;
 pub mod parser;
 pub mod ir;
 pub mod lowering;
+pub mod liveness;
+pub mod regalloc;
 pub mod backend;
