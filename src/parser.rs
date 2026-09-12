@@ -56,6 +56,20 @@ impl<I: Iterator<Item = Token>> Parser<I> {
                 
                 Ok(Stmt::Let(name, ty, expr))
             }
+            Some(Token::Star) => {
+                let name = match self.tokens.next() {
+                    Some(Token::Ident(n)) => n,
+                    _ => return Err("Se esperaba un identificador tras '*'".to_string()),
+                };
+                if self.tokens.next() != Some(Token::Assign) {
+                    return Err("Se esperaba '=' tras desreferenciación".to_string());
+                }
+                let expr = self.parse_expr()?;
+                if self.tokens.next() != Some(Token::Semi) {
+                    return Err("Se esperaba ';'".to_string());
+                }
+                Ok(Stmt::Assign(Expr::Deref(Box::new(Expr::Variable(name))), expr))
+            }
             _ => Err("Sentencia no válida o no soportada".to_string()),
         }
     }

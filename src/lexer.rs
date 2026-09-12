@@ -17,6 +17,7 @@ pub enum Token {
     #[token(";")] Semi,
     #[token("{")] LBrace,
     #[token("}")] RBrace,
+    #[token("*")] Star,
     
     // Identificadores (Extracción Semántica)
     #[regex("[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_string())]

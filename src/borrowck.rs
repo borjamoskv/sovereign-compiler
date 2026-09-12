@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use crate::ast::{Type, Stmt, Expr};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +81,68 @@ impl BorrowContext {
         }
         drops
     }
+
+    /// Comprueba si una variable específica sigue activa y es afín para ejecutar un Early Drop (NLL).
+    pub fn try_early_drop(&mut self, name: &str) -> Option<Stmt> {
+        if let Some(state) = self.get_mut_state(name) {
+            if let ResourceState::Active(ty) = state {
+                if ty.is_affine() {
+                    *state = ResourceState::Dropped;
+                    return Some(Stmt::SyntheticDrop(name.to_string()));
+                }
+            }
+        }
+        None
+    }
+}
+
+// --- Geodésicas de No-Léxicas (NLL Liveness Analysis) ---
+
+fn collect_used_vars_expr(expr: &Expr, vars: &mut HashSet<String>) {
+    match expr {
+        Expr::Variable(name) | Expr::Move(name) | Expr::Borrow(name) | Expr::BorrowMut(name) => {
+            vars.insert(name.clone());
+        }
+        Expr::Deref(inner) => collect_used_vars_expr(inner, vars),
+        Expr::Add(l, r) => {
+            collect_used_vars_expr(l, vars);
+            collect_used_vars_expr(r, vars);
+        }
+        _ => {}
+    }
+}
+
+fn collect_used_vars_stmt(stmt: &Stmt, vars: &mut HashSet<String>) {
+    match stmt {
+        Stmt::Let(_, _, expr) => collect_used_vars_expr(expr, vars),
+        Stmt::Assign(left, right) => {
+            collect_used_vars_expr(left, vars);
+            collect_used_vars_expr(right, vars);
+        }
+        Stmt::Return(expr) => collect_used_vars_expr(expr, vars),
+        Stmt::Block(inner) | Stmt::UnsafeBlock(inner) => {
+            for s in inner {
+                collect_used_vars_stmt(s, vars);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Calcula el índice de la última sentencia en la que cada variable es observada (Liveness Horizon).
+fn compute_liveness_horizon(stmts: &[Stmt]) -> HashMap<String, usize> {
+    let mut horizon: HashMap<String, usize> = HashMap::new();
+    for (idx, stmt) in stmts.iter().enumerate() {
+        if let Stmt::Let(name, _, _) = stmt {
+            horizon.entry(name.clone()).or_insert(idx);
+        }
+        let mut used = HashSet::new();
+        collect_used_vars_stmt(stmt, &mut used);
+        for var_name in used {
+            horizon.insert(var_name, idx);
+        }
+    }
+    horizon
 }
 
 pub fn check_statement(stmt: &Stmt, ctx: &mut BorrowContext) -> Result<Vec<Stmt>, String> {
@@ -99,18 +161,44 @@ pub fn check_statement(stmt: &Stmt, ctx: &mut BorrowContext) -> Result<Vec<Stmt>
         }
         Stmt::Block(stmts) => {
             ctx.push_scope();
+            let liveness = compute_liveness_horizon(stmts);
             let mut transformed_stmts = Vec::new();
-            for s in stmts {
+
+            for (idx, s) in stmts.iter().enumerate() {
                 transformed_stmts.extend(check_statement(s, ctx)?);
+
+                // NLL (Non-Lexical Lifetimes): Inyección inmediata tras el horizonte geodésico
+                for (var_name, &last_idx) in &liveness {
+                    if last_idx == idx {
+                        if let Some(drop_node) = ctx.try_early_drop(var_name) {
+                            transformed_stmts.push(drop_node);
+                        }
+                    }
+                }
             }
+
             let scope_vars = ctx.pop_scope();
-            let synthetic_drops = ctx.synthesize_drops_for_scope(scope_vars);
-            transformed_stmts.extend(synthetic_drops);
+            // Cualquier recurso remanente que no haya caído por NLL se destruye aquí
+            let fallback_drops = ctx.synthesize_drops_for_scope(scope_vars);
+            transformed_stmts.extend(fallback_drops);
             
             Ok(vec![Stmt::Block(transformed_stmts)])
         }
-        Stmt::Assign(_left, right) => {
+        Stmt::Assign(left, right) => {
             check_expression(right, ctx)?;
+            if let Expr::Deref(inner) = left {
+                if let Expr::Variable(name) = &**inner {
+                    let state = ctx.get_mut_state(name)
+                        .ok_or_else(|| format!("Variable no declarada '{}'", name))?;
+                    if let ResourceState::Active(ty) = state {
+                        if let Type::RawPtr(_) = ty {
+                            if !ctx.is_unsafe {
+                                return Err(format!("Anergía detectada: Imposible desreferenciar puntero físico '{}' fuera de 'unsafe'", name));
+                            }
+                        }
+                    }
+                }
+            }
             Ok(vec![stmt.clone()])
         }
         Stmt::UnsafeBlock(stmts) => {
@@ -118,16 +206,24 @@ pub fn check_statement(stmt: &Stmt, ctx: &mut BorrowContext) -> Result<Vec<Stmt>
             let previous_unsafe = ctx.is_unsafe;
             ctx.is_unsafe = true; // Elevación epistémica
             
+            let liveness = compute_liveness_horizon(stmts);
             let mut transformed_stmts = Vec::new();
-            for s in stmts {
+            for (idx, s) in stmts.iter().enumerate() {
                 transformed_stmts.extend(check_statement(s, ctx)?);
+                for (var_name, &last_idx) in &liveness {
+                    if last_idx == idx {
+                        if let Some(drop_node) = ctx.try_early_drop(var_name) {
+                            transformed_stmts.push(drop_node);
+                        }
+                    }
+                }
             }
             
             ctx.is_unsafe = previous_unsafe; // Restauración de Manta de Markov
             
             let scope_vars = ctx.pop_scope();
-            let synthetic_drops = ctx.synthesize_drops_for_scope(scope_vars);
-            transformed_stmts.extend(synthetic_drops);
+            let fallback_drops = ctx.synthesize_drops_for_scope(scope_vars);
+            transformed_stmts.extend(fallback_drops);
             
             Ok(vec![Stmt::UnsafeBlock(transformed_stmts)])
         }
