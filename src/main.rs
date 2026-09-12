@@ -7,6 +7,7 @@ pub mod lowering;
 pub mod liveness;
 pub mod regalloc;
 pub mod backend;
+pub mod jit;
 
 use logos::Logos;
 use lexer::Token;
@@ -16,6 +17,7 @@ use lowering::IrLoweringVisitor;
 use liveness::compute_live_intervals;
 use regalloc::LinearScanAllocator;
 use backend::generate_x86_64_optimized;
+use jit::SovereignJitEngine;
 
 fn main() {
     println!("=================================================================");
@@ -108,4 +110,30 @@ fn main() {
     println!("\n--- OUTPUT ENSAMBLADOR EMITIDO (ALTA EXERGÍA) ---");
     println!("{}", asm_output);
     println!("-------------------------------------------------");
+
+    // --- FASE 8: Ejecución JIT (Salto de Fase C5-REAL) ---
+    println!("\n[9] Sovereign JIT Engine: Materialización in-memory (W^X Invariant)...");
+    
+    // Opcodes correspondientes a: `mov rax, 42; ret`
+    // (Demostración de ejecución inyectada desde memoria anónima sin I/O de disco)
+    // Detección C5-REAL: Target ARM64 detectado (macOS M-series)
+    // Opcodes correspondientes a: `mov x0, #42; ret`
+    let machine_code: Vec<u8> = vec![
+        0x40, 0x05, 0x80, 0xD2, // mov x0, #42
+        0xC0, 0x03, 0x5F, 0xD6  // ret
+    ];
+
+    let engine = SovereignJitEngine::new(machine_code);
+    unsafe {
+        match engine.execute() {
+            Ok(result) => {
+                println!("[+] Colapso Gödeliano exitoso. No I/O. Cero Burocracia.");
+                println!("[+] Código Máquina Directo Retornó: {}", result);
+            }
+            Err(e) => {
+                eprintln!("[!] Fallo Termodinámico JIT: {}", e);
+            }
+        }
+    }
 }
+

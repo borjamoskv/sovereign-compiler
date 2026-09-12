@@ -7,3 +7,4 @@ pub mod lowering;
 pub mod liveness;
 pub mod regalloc;
 pub mod backend;
+pub mod jit;
